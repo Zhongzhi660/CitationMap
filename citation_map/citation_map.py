@@ -194,6 +194,51 @@ def fill_known_affiliations(affiliation_name: str) -> Optional[str]:
             return KNOWN_AFFILIATION_DICT[key]
     return None
 
+# Country name aliases, used to merge different spellings of the same country
+# (e.g. the hard-coded 'USA' entries vs. Nominatim's 'United States') so the
+# country count is not inflated.
+_COUNTRY_ALIASES = {
+    'usa': 'United States',
+    'us': 'United States',
+    'u.s.': 'United States',
+    'u.s.a.': 'United States',
+    'united states of america': 'United States',
+    'america': 'United States',
+    'uk': 'United Kingdom',
+    'u.k.': 'United Kingdom',
+    'england': 'United Kingdom',
+    'scotland': 'United Kingdom',
+    'wales': 'United Kingdom',
+    'prc': 'China',
+    "people's republic of china": 'China',
+}
+
+# Honorific / membership / generic tokens that are NOT institutions. An
+# affiliation made up entirely of these is junk (e.g. 'IEEE SM' = "IEEE Senior
+# Member", 'FIEEE' = "IEEE Fellow"), and geocoding it produces nonsense such as
+# matching the token 'SM' to the country code of San Marino.
+_HONORIFIC_TOKENS = {
+    'ieee', 'aaai', 'acm', 'siam', 'asme', 'aps', 'rsc', 'acs',
+    'fellow', 'member', 'senior', 'life', 'distinguished', 'emeritus',
+    'sm', 'sr', 'jr', 'fieee', 'smieee', 'mieee',
+    'phd', 'msc', 'bsc', 'md', 'student', 'candidate', 'postdoc', 'postdoctoral',
+    'professor', 'prof', 'assistant', 'associate', 'adjunct', 'lecturer',
+    'researcher', 'scientist', 'scholar', 'director', 'head', 'chair',
+    'msca', 'mitacs', 'phd.', 'ph.d', 'ph.d.',
+    'and', 'of', 'the', 'at', 'in', 'for', 'a', '&',
+}
+
+
+def normalize_country(country_name: Optional[str]) -> Optional[str]:
+    '''Map different spellings of the same country to one canonical name.'''
+    if country_name is None or (isinstance(country_name, float)):
+        return country_name
+    name = str(country_name).strip()
+    if not name:
+        return name
+    return _COUNTRY_ALIASES.get(name.lower(), name)
+
+
 def affiliation_invalid(affiliation_name: str) -> bool:
     '''
     Check if the affiliation is invalid.
@@ -209,6 +254,13 @@ def affiliation_invalid(affiliation_name: str) -> bool:
     for key in invalid_affiliation_set:
         if key in affiliation_name.lower():
             return True
+
+    # Reject strings made up entirely of honorific / membership / generic tokens
+    # (e.g. 'IEEE SM', 'FIEEE', 'Senior Member'), which otherwise geocode to junk.
+    tokens = [t for t in re.split(r'[^a-zA-Z.&]+', affiliation_name.lower()) if t]
+    if tokens and all(token in _HONORIFIC_TOKENS for token in tokens):
+        return True
+
     return False
 
 
@@ -221,7 +273,7 @@ def _reverse_geocode_metadata(geolocator, latitude, longitude):
         county = address.get('county')
         city = address.get('city') or address.get('town') or address.get('village')
         state = address.get('state')
-        country = address.get('country')
+        country = normalize_country(address.get('country'))
     except Exception:
         pass
     return county, city, state, country
@@ -272,13 +324,21 @@ def affiliation_text_to_geocode(author_paper_affiliation_tuple_list: List[Tuple[
             else:
                 county, city, state, country, latitude, longitude = geo_location_tuple
                 coordinates_and_info.append((author_name, citing_paper_title, cited_paper_title, aff,
-                                             latitude, longitude, county, city, state, country))
+                                             latitude, longitude, county, city, state, normalize_country(country)))
 
     for affiliation_name in tqdm(affiliation_map,
                                  desc='Finding geographic coordinates from %d unique citing affiliations in %d entries' % (
                                      len(affiliation_map), len(author_paper_affiliation_tuple_list)),
                                  total=len(affiliation_map)):
-        # 0) Cached result?
+        # 0) Invalid (non-affiliation) string: record but do not geocode.
+        #    Checked before the cache so that improved filters also drop stale
+        #    junk that an earlier run may have cached (e.g. 'IEEE SM').
+        if affiliation_invalid(affiliation_name):
+            geo_cache[affiliation_name] = None
+            _record(affiliation_name, None)
+            continue
+
+        # 1) Cached result?
         if affiliation_name in geo_cache:
             result = geo_cache[affiliation_name]
             _record(affiliation_name, result)
@@ -286,17 +346,11 @@ def affiliation_text_to_geocode(author_paper_affiliation_tuple_list: List[Tuple[
                 num_located_affiliations += 1
             continue
 
-        # 1) Invalid (non-affiliation) string: record but do not geocode.
-        if affiliation_invalid(affiliation_name):
-            geo_cache[affiliation_name] = None
-            _record(affiliation_name, None)
-            continue
-
         # 2) Known affiliation (hard-coded headquarters).
         known = fill_known_affiliations(affiliation_name)
         if known is not None:
             county, city, state, country, latitude, longitude = known
-            result = (county, city, state, country, latitude, longitude)
+            result = (county, city, state, normalize_country(country), latitude, longitude)
             geo_cache[affiliation_name] = result
             _record(affiliation_name, result)
             num_located_affiliations += 1
@@ -420,7 +474,8 @@ def count_citation_stats(coordinates_and_info: List[Tuple[str]]) -> List[int]:
             continue
         unique_author_list.add(author_name)
         unique_affiliation_list.add(affiliation_name)
-        unique_country_list.add(country)
+        if country is not None and not (isinstance(country, float) and pd.isna(country)):
+            unique_country_list.add(normalize_country(country))
     num_authors, num_affiliations, num_countries = \
         len(unique_author_list), len(unique_affiliation_list), len(unique_country_list)
     return num_authors, num_affiliations, num_countries
