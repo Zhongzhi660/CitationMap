@@ -30,6 +30,10 @@ KNOWN_AFFILIATION_DICT = {
     'baidu': ('Haidian', 'Beijing', 'Beijing', 'China', 40.040239, 116.272669),
     'huawei': ('Longgang', 'Shenzhen', 'Guangdong', 'China', 22.657422, 114.057222),
     'samsung': ('Suwon', 'Suwon', 'Gyeonggi', 'South Korea', 37.258333, 127.054167),
+    # Research institutes whose names the geocoder mislocates to tiny country codes
+    # ('AI' -> Anguilla, 'Vector Institute' -> Jamaica, etc.).
+    'allen institute': ('King County', 'Seattle', 'Washington', 'USA', 47.625595, -122.337326),
+    'vector institute': ('Toronto', 'Toronto', 'Ontario', 'Canada', 43.658602, -79.398632),
     'morgan stanley': ('New York', 'New York', 'New York', 'USA', 40.760251, -73.98518),
     'siemens healthineers': ('Forchheim', 'Forchheim', 'Bavaria', 'Germany', 49.702088, 11.055870),
     'oracle': ('Travis', 'Austin', 'Texas', 'USA', 30.242913, -97.721641)

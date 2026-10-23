@@ -249,7 +249,8 @@ def affiliation_invalid(affiliation_name: str) -> bool:
     invalid_affiliation_set = {
         NO_AUTHOR_FOUND_STR.lower(),
         'computer', 'computer science', 'electrical', 'engineering', 'researcher',
-        'scholar', 'inc.', 'school', 'department', 'student', 'candidate', 'professor', 'faculty', 'associate'
+        'scholar', 'inc.', 'school', 'department', 'student', 'candidate', 'professor', 'faculty', 'associate',
+        'telecommunications',
     }
     for key in invalid_affiliation_set:
         if key in affiliation_name.lower():
@@ -259,6 +260,15 @@ def affiliation_invalid(affiliation_name: str) -> bool:
     # (e.g. 'IEEE SM', 'FIEEE', 'Senior Member'), which otherwise geocode to junk.
     tokens = [t for t in re.split(r'[^a-zA-Z.&]+', affiliation_name.lower()) if t]
     if tokens and all(token in _HONORIFIC_TOKENS for token in tokens):
+        return True
+
+    # Reject raw strings that still carry a society membership marker mixed in
+    # (e.g. "University of Arizona, AAAI SM, IEEE SM"): the geocoder latches onto
+    # the "SM" token and returns San Marino. The cleaned sub-affiliations already
+    # cover the real institution in these strings, so dropping the raw form is safe.
+    if re.search(r'\b(aaai|ieee|acm|siam|asme|aps)\s+(sm|sr|fellow|member)\b', affiliation_name.lower()):
+        return True
+    if re.search(r'\b(fieee|smieee|mieee|faaai)\b', affiliation_name.lower()):
         return True
 
     return False
@@ -338,15 +348,9 @@ def affiliation_text_to_geocode(author_paper_affiliation_tuple_list: List[Tuple[
             _record(affiliation_name, None)
             continue
 
-        # 1) Cached result?
-        if affiliation_name in geo_cache:
-            result = geo_cache[affiliation_name]
-            _record(affiliation_name, result)
-            if result is not None:
-                num_located_affiliations += 1
-            continue
-
-        # 2) Known affiliation (hard-coded headquarters).
+        # 1) Known affiliation (hard-coded headquarters). Checked before the cache
+        #    so improved/corrected entries override stale cached geocodes
+        #    (e.g. 'Allen Institute for AI' wrongly cached as Anguilla).
         known = fill_known_affiliations(affiliation_name)
         if known is not None:
             county, city, state, country, latitude, longitude = known
@@ -354,6 +358,14 @@ def affiliation_text_to_geocode(author_paper_affiliation_tuple_list: List[Tuple[
             geo_cache[affiliation_name] = result
             _record(affiliation_name, result)
             num_located_affiliations += 1
+            continue
+
+        # 2) Cached result?
+        if affiliation_name in geo_cache:
+            result = geo_cache[affiliation_name]
+            _record(affiliation_name, result)
+            if result is not None:
+                num_located_affiliations += 1
             continue
 
         # 3) Geocode via Nominatim, then ArcGIS as a fallback.
@@ -420,11 +432,15 @@ def create_map(coordinates_and_info: List[Tuple[str]], pin_colorful: bool = True
 
     For authors under the same affiliations, they will be displayed in the same pin.
     '''
-    # NOTE: Use CartoDB Positron tiles instead of folium's default OpenStreetMap
-    # tiles. OpenStreetMap's volunteer tile servers now return HTTP 403
-    # ("Access blocked / tile usage policy") for folium's default requests,
-    # which makes the base map render as a wall of error tiles.
-    citation_map = folium.Map(location=[20, 0], zoom_start=2, tiles='CartoDB positron')
+    # NOTE: Use Esri's free (no API key) light-gray basemap. folium's default
+    # OpenStreetMap tiles now return HTTP 403 ("tile usage policy"), and the
+    # built-in CartoDB tiles now require an API key ("API KEY REQUIRED"); both
+    # make the base map render as a wall of error tiles. Esri's ArcGIS Online
+    # tiles render reliably without a key. (Esri uses {z}/{y}/{x} tile order.)
+    citation_map = folium.Map(
+        location=[20, 0], zoom_start=2,
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+        attr='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ')
 
     # Find unique affiliations and record their corresponding entries.
     affiliation_map = {}
