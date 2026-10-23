@@ -15,5 +15,5 @@ data
 **/*.html
 
 # Local run artifacts
-run.log
+run*.log
 cache/
