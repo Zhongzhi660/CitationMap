@@ -13,3 +13,7 @@ data
 **/*.npz
 **/*.csv
 **/*.html
+
+# Local run artifacts
+run.log
+cache/
