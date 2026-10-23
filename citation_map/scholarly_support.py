@@ -136,17 +136,81 @@ class _Fetcher:
             url, max_retries, last_error))
 
 
+class _BrowserFetcher:
+    '''
+    Fetches Scholar pages through a *visible* Chrome window using Selenium.
+
+    This is meant for running locally. When Google Scholar shows a CAPTCHA, the
+    pure-HTTP fetcher cannot continue; here the real browser lets you solve the
+    CAPTCHA by hand, then the program carries on. The browser's cookies persist
+    across requests, which also reduces how often CAPTCHAs appear.
+    '''
+
+    def __init__(self, min_interval: float = 2.0):
+        self.min_interval = min_interval
+        self._last_request_time = 0.0
+        self._driver = None
+
+    def _get_driver(self):
+        if self._driver is None:
+            # Imported lazily so HTTP-only users don't need Selenium/Chrome.
+            from selenium import webdriver
+            self._driver = webdriver.Chrome()
+            print('[INFO] A Chrome window has opened. If a CAPTCHA / "I\'m not a robot" '
+                  'page appears in it, solve it there, then return here and press Enter.')
+            print('[INFO] KEEP THE CHROME WINDOW OPEN until CitationMap finishes.')
+        return self._driver
+
+    def get(self, url: str, max_retries: int = 4) -> str:
+        driver = self._get_driver()
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self.min_interval:
+            time.sleep(self.min_interval - elapsed)
+        time.sleep(random.uniform(0.5, 1.5))
+
+        driver.get(url)
+        self._last_request_time = time.time()
+
+        for _ in range(max_retries):
+            html = driver.page_source
+            lower_html = html.lower()
+            if any(marker in lower_html for marker in _Fetcher._CAPTCHA_MARKERS):
+                print('\n' + '=' * 64)
+                print('CAPTCHA detected. Please solve it in the Chrome window,')
+                print('then come back here and press Enter to continue...')
+                print('=' * 64)
+                try:
+                    input()
+                except EOFError:
+                    # No interactive console available; fall back to a long wait.
+                    time.sleep(30)
+                time.sleep(1.0)
+                # Re-read (the solved page should now be shown); if the browser
+                # didn't navigate back to the target, reload it.
+                if any(m in driver.page_source.lower() for m in _Fetcher._CAPTCHA_MARKERS):
+                    driver.get(url)
+                    time.sleep(1.0)
+                continue
+            return html
+        # Give up after repeated CAPTCHAs on the same URL.
+        raise CaptchaError('Repeated CAPTCHA for %s even after manual solving.' % url)
+
+
 # A single module-level fetcher shared across calls so the session (and its
 # politeness throttle) persists. ``min_interval`` can be tuned by the caller.
 _fetcher = _Fetcher()
 
 
-def configure_fetcher(min_interval: float = 1.0, proxies: Optional[dict] = None) -> None:
-    '''Reconfigure the shared fetcher (request interval and optional proxies).'''
+def configure_fetcher(min_interval: float = 1.0, proxies: Optional[dict] = None,
+                      use_browser: bool = False) -> None:
+    '''Reconfigure the shared fetcher (request interval, optional proxies, browser mode).'''
     global _fetcher
-    _fetcher = _Fetcher(min_interval=min_interval)
-    if proxies:
-        _fetcher.session.proxies.update(proxies)
+    if use_browser:
+        _fetcher = _BrowserFetcher(min_interval=max(min_interval, 2.0))
+    else:
+        _fetcher = _Fetcher(min_interval=min_interval)
+        if proxies:
+            _fetcher.session.proxies.update(proxies)
 
 
 def get_publications_and_cites(scholar_id: str) -> Tuple[str, List[Tuple[str, str]]]:

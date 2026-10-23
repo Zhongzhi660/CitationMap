@@ -661,6 +661,7 @@ def generate_citation_map(scholar_id: str,
                           affiliation_conservative: bool = False,
                           num_processes: int = 16,
                           use_proxy: bool = False,
+                          use_browser: bool = False,
                           request_interval: float = 1.0,
                           source: str = 'scholar',
                           openalex_api_key: Optional[str] = None,
@@ -738,7 +739,7 @@ def generate_citation_map(scholar_id: str,
                 print('Using proxy: %s' % http_proxy)
             else:
                 print('[Warning] use_proxy=True but no HTTP_PROXY/HTTPS_PROXY env var found.')
-        configure_fetcher(min_interval=request_interval, proxies=proxies)
+        configure_fetcher(min_interval=request_interval, proxies=proxies, use_browser=use_browser)
 
         # NOTE: Step 1 & 2. Find all publications and citing authors (checkpointed).
         all_citing_author_paper_tuple_list = find_all_citing_authors(
