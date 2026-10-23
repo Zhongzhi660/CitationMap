@@ -420,7 +420,11 @@ def create_map(coordinates_and_info: List[Tuple[str]], pin_colorful: bool = True
 
     For authors under the same affiliations, they will be displayed in the same pin.
     '''
-    citation_map = folium.Map(location=[20, 0], zoom_start=2)
+    # NOTE: Use CartoDB Positron tiles instead of folium's default OpenStreetMap
+    # tiles. OpenStreetMap's volunteer tile servers now return HTTP 403
+    # ("Access blocked / tile usage policy") for folium's default requests,
+    # which makes the base map render as a wall of error tiles.
+    citation_map = folium.Map(location=[20, 0], zoom_start=2, tiles='CartoDB positron')
 
     # Find unique affiliations and record their corresponding entries.
     affiliation_map = {}
