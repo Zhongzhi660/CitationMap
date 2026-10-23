@@ -22,6 +22,12 @@ from .scholarly_support import (
     NO_AUTHOR_FOUND_STR,
     KNOWN_AFFILIATION_DICT,
 )
+from .openalex_support import (
+    OpenAlexClient,
+    match_works_by_titles,
+    get_citing_records,
+    resolve_institution_geo,
+)
 
 
 def find_all_citing_authors(scholar_id: str,
@@ -561,6 +567,92 @@ def load_cache(fpath: str) -> Any:
     with open(fpath, "rb") as fd:
         return pickle.load(fd)
 
+def run_openalex_pipeline(scholar_id: str,
+                          openalex_api_key: Optional[str] = None,
+                          openalex_mailto: Optional[str] = None,
+                          cache_folder: Optional[str] = 'cache') -> List[Tuple[str]]:
+    '''
+    Build the coordinate list using OpenAlex instead of Google Scholar's
+    (CAPTCHA-protected) citing-paper search.
+
+    The author's publication titles are read from their Google Scholar profile
+    (that endpoint is not blocked), matched to OpenAlex works, and the citing
+    authors + institutions (with built-in coordinates) are fetched from OpenAlex.
+    Every stage is checkpointed so an interrupted run resumes from cache.
+    '''
+    client = OpenAlexClient(api_key=openalex_api_key, mailto=openalex_mailto)
+
+    # ---- Step 1: the author's publication titles (via Google Scholar profile). ----
+    pubs_cache = _cache_path(cache_folder, scholar_id, 'publications_and_cites.pkl')
+    if pubs_cache is not None and os.path.exists(pubs_cache):
+        author_name, cites_list = load_cache(pubs_cache)
+    else:
+        author_name, cites_list = get_publications_and_cites(scholar_id)
+        if pubs_cache is not None:
+            save_cache((author_name, cites_list), pubs_cache)
+    titles = list(dict.fromkeys(title for _, title in cites_list if title))
+    print('Profile: %s. %d cited publication titles to match on OpenAlex.\n' % (author_name, len(titles)))
+
+    # ---- Step 2: match titles to OpenAlex works (verifying the author). ----
+    works_cache = _cache_path(cache_folder, scholar_id, 'openalex_works.pkl')
+    if works_cache is not None and os.path.exists(works_cache):
+        works = load_cache(works_cache)
+    else:
+        works = match_works_by_titles(client, titles, author_name_hint=author_name)
+        if works_cache is not None:
+            save_cache(works, works_cache)
+    print('Matched %d/%d publications to OpenAlex works.\n' % (len(works), len(titles)))
+
+    # ---- Step 3: citing records per work (incremental checkpoint). ----
+    citing_cache = _cache_path(cache_folder, scholar_id, 'openalex_citing_by_work.pkl')
+    citing_by_work = {}
+    if citing_cache is not None and os.path.exists(citing_cache):
+        citing_by_work = load_cache(citing_cache)
+    for work_id, cited_title in tqdm(works, desc='Fetching citing works from OpenAlex', total=len(works)):
+        if work_id in citing_by_work:
+            continue
+        citing_by_work[work_id] = get_citing_records(client, work_id, cited_title)
+        if citing_cache is not None:
+            save_cache(citing_by_work, citing_cache)
+
+    all_records = []
+    for recs in citing_by_work.values():
+        all_records.extend(recs)
+    print('\n%d citing (author, institution) records collected.\n' % len(all_records))
+
+    # ---- Step 4: resolve institutions to coordinates (cached). ----
+    geo_cache_path = _cache_path(cache_folder, scholar_id, 'openalex_institution_geo.pkl')
+    institution_geo = {}
+    if geo_cache_path is not None and os.path.exists(geo_cache_path):
+        institution_geo = load_cache(geo_cache_path)
+    needed = [inst_id for (_, _, _, inst_id, _, _) in all_records
+              if inst_id and inst_id not in institution_geo]
+    if needed:
+        institution_geo.update(resolve_institution_geo(client, needed))
+        if geo_cache_path is not None:
+            save_cache(institution_geo, geo_cache_path)
+
+    # ---- Step 5: build the 10-tuple coordinate list. ----
+    coordinates_and_info = []
+    for author_name_c, citing_title, cited_title, inst_id, inst_name, _ in all_records:
+        geo = institution_geo.get(inst_id) if inst_id else None
+        if geo and geo.get('latitude') is not None and geo.get('longitude') is not None:
+            coordinates_and_info.append((
+                author_name_c, citing_title, cited_title, geo.get('display_name') or inst_name or '',
+                geo['latitude'], geo['longitude'],
+                '', geo.get('city') or '', geo.get('region') or '',
+                normalize_country(geo.get('country'))))
+        else:
+            # No institution or no coordinates: keep the record (uncounted on the
+            # map) with an empty location so it still appears in the CSV.
+            coordinates_and_info.append((
+                author_name_c, citing_title, cited_title, inst_name or '',
+                '', '', '', '', '', ''))
+
+    coordinates_and_info = sorted(list(set(coordinates_and_info)))
+    return coordinates_and_info
+
+
 def generate_citation_map(scholar_id: str,
                           output_path: str = 'citation_map.html',
                           csv_output_path: str = 'citation_info.csv',
@@ -570,6 +662,9 @@ def generate_citation_map(scholar_id: str,
                           num_processes: int = 16,
                           use_proxy: bool = False,
                           request_interval: float = 1.0,
+                          source: str = 'scholar',
+                          openalex_api_key: Optional[str] = None,
+                          openalex_mailto: Optional[str] = None,
                           pin_colorful: bool = True,
                           print_citing_affiliations: bool = True):
     '''
@@ -622,7 +717,17 @@ def generate_citation_map(scholar_id: str,
         If true, print the list of citing affiliations (affiliations of citing authors).
     '''
 
-    if not parse_csv:
+    if not parse_csv and source == 'openalex':
+        # OpenAlex data source: free API, no CAPTCHA, institutions carry coordinates.
+        coordinates_and_info = run_openalex_pipeline(
+            scholar_id,
+            openalex_api_key=openalex_api_key,
+            openalex_mailto=openalex_mailto,
+            cache_folder=cache_folder)
+        export_dict_to_csv(coordinates_and_info, csv_output_path)
+        print('\nCitation information exported to %s.' % csv_output_path)
+
+    elif not parse_csv:
 
         # Configure the shared HTTP fetcher (request interval + optional proxy).
         proxies = None
